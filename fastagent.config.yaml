@@ -4,6 +4,9 @@ logger:
   type: file
   level: debug   # Set to debug for better visibility
   truncate_tools: true
+  
+# Default Model Configuration:
+default_model: openai.gpt-4.1-nano
 
 mcp:
   servers:
