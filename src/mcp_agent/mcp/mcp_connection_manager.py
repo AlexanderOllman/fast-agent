@@ -303,6 +303,27 @@ class MCPConnectionManager(ContextDependent):
                     reconnection_options=reconnection_options,
                     skip_initialization=is_mcpo_endpoint,  # Skip initialization for MCPO endpoints
                 )
+            elif config.transport == "mcpo_http":
+                if not config.url:
+                    raise ValueError(f"URL is required for MCPO HTTP transport: {server_name}")
+                
+                # Import dynamically to avoid circular imports
+                from mcp_agent.mcp.mcpo_http import mcpo_http_client
+                
+                # Create reconnection options based on configuration
+                reconnection_options = {
+                    "initial_reconnection_delay": 1000,  # 1 second
+                    "max_reconnection_delay": 30000,     # 30 seconds
+                    "reconnection_delay_grow_factor": 1.5,
+                    "max_retries": 2,
+                }
+                
+                logger.debug(f"{server_name}: Creating MCPO HTTP client for endpoint: {config.url}")
+                return mcpo_http_client(
+                    config.url,
+                    config.headers,
+                    reconnection_options=reconnection_options,
+                )
             else:
                 raise ValueError(f"Unsupported transport: {config.transport}")
 
