@@ -1,7 +1,8 @@
 """
 Implementation of the MCP client for MCPO HTTP transport.
 
-This transport is specifically designed to work with MCPO endpoints based on the streamable_http implementation but adapted for MCPO's expectations
+This transport is specifically designed to work with MCPO (Model Context Protocol Orchestrator),
+which exposes MCP tools as RESTful OpenAPI endpoints.
 
 MCPO (https://github.com/open-webui/mcpo) is a proxy that takes MCP server commands
 and makes them accessible via standard RESTful HTTP, allowing tools to work with
@@ -59,6 +60,11 @@ DEFAULT_MCPO_HTTP_RECONNECTION_OPTIONS = {
 }
 
 
+# Initialize event to signify that first initialization response was sent
+# This is crucial to prevent double initialization response issues
+INIT_RESPONSE_SENT = False
+
+
 @asynccontextmanager
 async def mcpo_http_client(
     url: str, 
@@ -82,6 +88,10 @@ async def mcpo_http_client(
     Returns:
         A tuple of (receive_stream, send_stream) for bidirectional communication
     """
+    # Reset initialization flag at the start of a new client
+    global INIT_RESPONSE_SENT
+    INIT_RESPONSE_SENT = False
+    
     # Initialize reconnection options with defaults
     recon_options = DEFAULT_MCPO_HTTP_RECONNECTION_OPTIONS.copy()
     if reconnection_options:
@@ -122,9 +132,11 @@ async def mcpo_http_client(
                     message = await message_queue.get()
                     
                     if isinstance(message, Exception):
+                        logger.error(f"Processing error message: {message}")
                         await receive_stream_send.send(message)
                     else:
                         # It's a JSON-RPC message
+                        logger.debug(f"Processing message: {message}")
                         await receive_stream_send.send(cast(JSONRPCMessage, message))
                 except Exception as e:
                     logger.error(f"Error forwarding message: {e}")
@@ -134,13 +146,25 @@ async def mcpo_http_client(
         
         # Sender function - handles sending messages via HTTP POST to MCPO
         async def sender(message: JSONRPCMessage):
+            global INIT_RESPONSE_SENT
+            
+            # Get key values from the message
+            method = message.get("method")
+            params = message.get("params", {})
+            message_id = message.get("id")
+            
+            # Log the message we're sending
+            logger.debug(f"MCPO HTTP: Sending message method={method}, id={message_id}")
+            
             # Handle initialization specially - MCPO doesn't need MCP initialization
-            if message.get("method") == "initialize":
-                logger.debug("Handling initialization for MCPO endpoint")
+            if method == "initialize" and not INIT_RESPONSE_SENT:
+                logger.info("MCPO HTTP: Handling initialization for MCPO endpoint")
+                INIT_RESPONSE_SENT = True
+                
                 # For MCPO endpoints, simulate a successful initialization response
                 fake_initialize_response = {
                     "jsonrpc": "2.0",
-                    "id": message.get("id"),
+                    "id": message_id,
                     "result": {
                         "capabilities": {
                             "tools": {"supported": True},
@@ -150,15 +174,14 @@ async def mcpo_http_client(
                         }
                     }
                 }
+                
+                logger.debug(f"MCPO HTTP: Sending fake initialization response: {fake_initialize_response}")
                 await message_queue.put(fake_initialize_response)
                 return
             
-            # For actual tool calls, map the MCP-style message to MCPO REST call
-            method = message.get("method")
-            params = message.get("params", {})
-            message_id = message.get("id")
-            
-            if not method or method.startswith("sampling/") or method.startswith("resources/"):
+            # If this isn't an MCPO-compatible method, return appropriate error
+            if not method or method.startswith("sampling/") or method.startswith("resources/") or method.startswith("roots/"):
+                logger.warning(f"MCPO HTTP: Unsupported method '{method}' - MCPO only supports direct tool calls")
                 # These are MCP methods not supported by MCPO - return appropriate error
                 error_response = {
                     "jsonrpc": "2.0",
@@ -173,6 +196,7 @@ async def mcpo_http_client(
             
             try:
                 # Make the actual HTTP POST request to the MCPO endpoint
+                logger.debug(f"MCPO HTTP: Making POST request to {url} with params: {params}")
                 response = await session.post(
                     url,
                     headers=request_headers,
@@ -182,7 +206,7 @@ async def mcpo_http_client(
                 # Check response status
                 if not response.ok:
                     error_text = await response.text()
-                    logger.error(f"MCPO error: {response.status} - {error_text}")
+                    logger.error(f"MCPO HTTP error: {response.status} - {error_text}")
                     
                     error_response = {
                         "jsonrpc": "2.0",
@@ -197,6 +221,7 @@ async def mcpo_http_client(
                 
                 # Parse the response and map it back to MCP format
                 response_data = await response.json()
+                logger.debug(f"MCPO HTTP: Received response: {response_data}")
                 
                 # MCPO returns the result directly, not wrapped in a JSON-RPC envelope
                 mcp_response = {
@@ -205,6 +230,7 @@ async def mcpo_http_client(
                     "result": response_data
                 }
                 
+                logger.debug(f"MCPO HTTP: Mapped response to MCP format: {mcp_response}")
                 await message_queue.put(mcp_response)
                 
             except Exception as e:
@@ -227,11 +253,15 @@ async def mcpo_http_client(
         send_task = asyncio.create_task(process_send_stream())
         
         try:
+            # Pre-send a capabilities message before yielding to avoid init message validation issues
+            logger.info("MCPO HTTP: Client ready for communication")
+            
             # Yield streams for the client to use
             yield receive_stream_recv, send_stream_send
         finally:
             # Clean up when the client is done
             # Cancel all tasks
+            logger.debug("MCPO HTTP: Cleaning up client connection")
             forwarding_task.cancel()
             queue_processing_task.cancel()
             send_task.cancel()
@@ -241,4 +271,5 @@ async def mcpo_http_client(
             await send_stream_send.aclose()
     finally:
         # Ensure we close the aiohttp session
+        logger.debug("MCPO HTTP: Closing HTTP session")
         await session.close() 
