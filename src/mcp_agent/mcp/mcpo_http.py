@@ -45,92 +45,6 @@ async def receive_from_stream_into_queue(stream, queue):
         await queue.put(e)
 
 
-# Custom client session for MCPO endpoints
-class MCPOClientSession(ClientSession):
-    """A custom ClientSession that completely overrides initialization for MCPO endpoints."""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Flag to track if we're initialized
-        self._is_initialized = False
-        self._capabilities = ServerCapabilities(
-            tools={"supported": True},
-            prompts={"supported": False},
-            resources={"supported": False},
-            roots={"supported": False}
-        )
-    
-    async def __aenter__(self):
-        """
-        Override the enter method to avoid sending an actual initialize message
-        to the MCPO endpoint, which doesn't support it.
-        """
-        logger.info("MCPO HTTP: Custom session __aenter__ called")
-        
-        # We need to enter the task group still
-        await self._task_group.__aenter__()
-        
-        # But we don't want to send the initialize message that would normally happen here
-        # So we'll mark ourselves as initialized without sending any message
-        self._is_initialized = True
-        
-        return self
-    
-    async def initialize(self):
-        """
-        Override the initialize method to return pre-defined capabilities
-        without sending any message to the server.
-        
-        Returns:
-            ServerCapabilities object with pre-defined values
-        """
-        logger.info("MCPO HTTP: Using custom initialize method")
-        
-        # Return pre-defined capabilities
-        return self._capabilities
-    
-    async def call_tool(self, method: str, params: Dict, **kwargs):
-        """
-        Call a tool on the MCPO endpoint.
-        
-        Args:
-            method: The name of the tool method to call
-            params: The parameters to pass to the tool
-            
-        Returns:
-            The result of the tool call
-        """
-        logger.debug(f"MCPO HTTP: Calling tool {method} with params {params}")
-        
-        # Generate a unique ID for this request
-        request_id = str(uuid.uuid4())
-        
-        # Format as JSON-RPC request
-        request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params
-        }
-        
-        # Send the request through the normal write stream
-        await self._write_stream.send(request)
-        
-        # Wait for the response with matching ID
-        while True:
-            message = await self._read_stream.receive()
-            
-            if isinstance(message, Exception):
-                raise message
-                
-            if message.get("id") == request_id:
-                if "error" in message:
-                    error = message["error"]
-                    raise Exception(f"MCPO tool error: {error.get('message', 'Unknown error')}")
-                
-                return message.get("result")
-
-
 class MCPOHTTPError(Exception):
     """Error during MCPO HTTP connection."""
 
@@ -255,7 +169,7 @@ async def mcpo_http_client(
             
             # Skip initialize method - completely ignore it at this level
             if method == "initialize":
-                logger.info("MCPO HTTP: Ignoring initialize request at sender level")
+                logger.info("MCPO HTTP: Sending fake successful response for initialize request")
                 # Manually send a successful response to the initialize request
                 fake_response = {
                     "jsonrpc": "2.0",

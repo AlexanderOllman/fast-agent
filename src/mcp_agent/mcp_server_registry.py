@@ -175,7 +175,7 @@ class ServerRegistry:
                 raise ValueError(f"URL is required for MCPO HTTP transport: {server_name}")
             
             # Import dynamically to avoid circular imports
-            from mcp_agent.mcp.mcpo_http import mcpo_http_client, MCPOClientSession
+            from mcp_agent.mcp.mcpo_http import mcpo_http_client
             
             # Create reconnection options based on configuration
             reconnection_options = {
@@ -186,26 +186,30 @@ class ServerRegistry:
             }
             
             logger.debug(f"{server_name}: Creating MCPO HTTP client for endpoint: {config.url}")
-            transport_context = mcpo_http_client(
+            # Use mcpo_http_client to get the read and write streams
+            async with mcpo_http_client(
                 config.url,
                 config.headers,
                 reconnection_options=reconnection_options,
-            )
-            
-            # Use the custom session for MCPO HTTP transport
-            async with transport_context as (read_stream, write_stream):
-                # Override the client_session_factory to use our custom MCPO session
-                session = MCPOClientSession(
+            ) as (read_stream, write_stream):
+                # Use the standard client session factory
+                session = client_session_factory(
                     read_stream,
                     write_stream,
                     read_timeout_seconds,
                 )
+                
+                # Mark the session as coming from an MCPO endpoint
+                if hasattr(session, "server_config"):
+                    session.server_config = config
+                    
                 async with session:
                     logger.info(f"{server_name}: Connected to server using MCPO HTTP transport.")
                     try:
                         yield session
                     finally:
                         logger.debug(f"{server_name}: Closed session to server")
+            
             return  # Return early since we've handled the context directly
 
         elif config.transport == "streamable_http":
