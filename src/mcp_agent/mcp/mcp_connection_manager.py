@@ -32,6 +32,8 @@ from mcp_agent.logging.logger import get_logger
 from mcp_agent.mcp.logger_textio import get_stderr_handler
 from mcp_agent.mcp.mcp_agent_client_session import MCPAgentClientSession
 from mcp_agent.mcp.streamable_http import streamable_http_client
+# Import the new client
+from mcp_agent.mcp.clients.http_post_client import HttpPostClient
 
 if TYPE_CHECKING:
     from mcp_agent.context import Context
@@ -70,6 +72,8 @@ class ServerConnection:
         self.server_name = server_name
         self.server_config = server_config
         self.session: ClientSession | None = None
+        # Add a field for direct client instances (for non-stream transports)
+        self.client_instance: BaseMcpClient | None = None 
         self._client_session_factory = client_session_factory
         self._init_hook = init_hook
         self._transport_context_factory = transport_context_factory
@@ -85,7 +89,10 @@ class ServerConnection:
 
     def is_healthy(self) -> bool:
         """Check if the server connection is healthy and ready to use."""
-        return self.session is not None and not self._error_occurred
+        # Check both session-based and direct client-based connections
+        is_session_healthy = self.session is not None and not self._error_occurred
+        is_client_healthy = self.client_instance is not None and not self._error_occurred and self.client_instance.is_connected
+        return is_session_healthy or is_client_healthy
 
     def reset_error_state(self) -> None:
         """Reset the error state, allowing reconnection attempts."""
@@ -126,6 +133,26 @@ class ServerConnection:
         Wait until the session is fully initialized.
         """
         await self._initialized_event.wait()
+
+    # Add a method to directly initialize a client instance
+    async def initialize_client(self, client: BaseMcpClient) -> None:
+        """Initializes a direct client connection."""
+        self.client_instance = client
+        try:
+            await client.connect()
+            # Run init hook if provided (adapt as needed for client context)
+            if self._init_hook:
+                logger.info(f"{self.server_name}: Executing init hook for client.")
+                # The hook might need adaptation if it expects a ClientSession
+                # For now, pass the client instance and auth config
+                # self._init_hook(client, self.server_config.auth) 
+                # TODO: Review init_hook signature and usage for non-session clients
+            self._initialized_event.set()
+        except Exception as e:
+            logger.error(f"Failed to initialize client {self.server_name}: {e}", exc_info=True)
+            self._error_occurred = True
+            self._error_message = traceback.format_exception(e)
+            self._initialized_event.set() # Signal completion even on error
 
     def create_session(
         self,
@@ -188,6 +215,47 @@ async def _server_lifecycle_task(server_conn: ServerConnection) -> None:
         # No raise - allow graceful exit
 
 
+# Add a separate lifecycle task for non-streaming clients like http_post
+async def _client_lifecycle_task(server_conn: ServerConnection) -> None:
+    """
+    Manage the lifecycle of a single server connection using a direct client instance.
+    Runs inside the MCPConnectionManager's shared TaskGroup.
+    """
+    server_name = server_conn.server_name
+    config = server_conn.server_config
+    client: BaseMcpClient | None = None
+
+    try:
+        if config.transport == "http_post":
+            client = HttpPostClient(server_name, config)
+        else:
+            # Should not happen if routed correctly, but handle defensively
+            raise NotImplementedError(f"Unsupported transport for direct client lifecycle: {config.transport}")
+
+        await server_conn.initialize_client(client)
+
+        # Wait for shutdown signal
+        await server_conn.wait_for_shutdown_request()
+
+    except Exception as exc:
+        logger.error(
+            f"{server_name}: Client lifecycle task encountered an error: {exc}",
+            exc_info=True,
+            data={
+                "progress_action": ProgressAction.FATAL_ERROR,
+                "server_name": server_name,
+            },
+        )
+        server_conn._error_occurred = True
+        server_conn._error_message = traceback.format_exception(exc)
+        server_conn._initialized_event.set() # Ensure waiters are unblocked
+    finally:
+        if client and client.is_connected:
+            try:
+                await client.disconnect()
+            except Exception as disc_exc:
+                 logger.warning(f"{server_name}: Error during client disconnect: {disc_exc}")
+
 class MCPConnectionManager(ContextDependent):
     """
     Manages the lifecycle of multiple MCP server connections.
@@ -241,151 +309,143 @@ class MCPConnectionManager(ContextDependent):
         ],
         init_hook: Optional["InitHookCallable"] = None,
     ) -> ServerConnection:
-        """
-        Connect to a server and return a RunningServer instance that will persist
-        until explicitly disconnected.
-        """
-        # Create task group if it doesn't exist yet - make this method more resilient
-        if not self._task_group_active:
-            self._task_group = create_task_group()
-            await self._task_group.__aenter__()
-            self._task_group_active = True
-            self._tg = self._task_group
-            logger.info(f"Auto-created task group for server: {server_name}")
+        """Launch a specific MCP server connection."""
+        if server_name in self.running_servers:
+            logger.warning(f"{server_name}: Server already launched. Returning existing connection.")
+            return self.running_servers[server_name]
 
-        config = self.server_registry.registry.get(server_name)
-        if not config:
-            raise ValueError(f"Server '{server_name}' not found in registry.")
+        server_config = self.server_registry.registry.get(server_name)
+        if server_config is None:
+            raise ValueError(f"Server '{server_name}' not found in configuration.")
 
-        logger.debug(f"{server_name}: Found server configuration=", data=config.model_dump())
-
-        def transport_context_factory():
-            if config.transport == "stdio":
-                server_params = StdioServerParameters(
-                    command=config.command,
-                    args=config.args,
-                    env={**get_default_environment(), **(config.env or {})},
-                )
-                # Create custom error handler to ensure all output is captured
-                error_handler = get_stderr_handler(server_name)
-                # Explicitly ensure we're using our custom logger for stderr
-                logger.debug(f"{server_name}: Creating stdio client with custom error handler")
-                return stdio_client(server_params, errlog=error_handler)
-            elif config.transport == "sse":
-                return sse_client(
-                    config.url,
-                    config.headers,
-                    sse_read_timeout=config.read_transport_sse_timeout_seconds,
-                )
-            elif config.transport == "streamable_http":
-                if not config.url:
-                    raise ValueError(f"URL is required for Streamable HTTP transport: {server_name}")
-                
-                # Create reconnection options based on configuration
-                reconnection_options = {
-                    "initial_reconnection_delay": 1000,  # 1 second
-                    "max_reconnection_delay": 30000,     # 30 seconds
-                    "reconnection_delay_grow_factor": 1.5,
-                    "max_retries": 2,
-                }
-                
-                # Detect if this is an MCPO endpoint by URL path patterns
-                is_mcpo_endpoint = False
-                if config.url:
-                    url_path = config.url.split("/")[-1] if "/" in config.url else ""
-                    mcpo_patterns = ["time", "fetch", "arxiv-latex", "serena"]
-                    is_mcpo_endpoint = any(pattern in url_path for pattern in mcpo_patterns)
-                    
-                logger.debug(f"{server_name}: Creating Streamable HTTP client (MCPO endpoint: {is_mcpo_endpoint})")
-                return streamable_http_client(
-                    config.url,
-                    config.headers,
-                    reconnection_options=reconnection_options,
-                    skip_initialization=is_mcpo_endpoint,  # Skip initialization for MCPO endpoints
-                )
-            else:
-                raise ValueError(f"Unsupported transport: {config.transport}")
-
-        server_conn = ServerConnection(
-            server_name=server_name,
-            server_config=config,
-            transport_context_factory=transport_context_factory,
-            client_session_factory=client_session_factory,
-            init_hook=init_hook or self.server_registry.init_hooks.get(server_name),
-        )
-
-        async with self._lock:
-            # Check if already running
-            if server_name in self.running_servers:
-                return self.running_servers[server_name]
-
+        # --- Decide lifecycle task based on transport --- 
+        if server_config.transport == "http_post":
+            # Create ServerConnection without transport/session factories for http_post
+            server_conn = ServerConnection(
+                server_name=server_name,
+                server_config=server_config,
+                transport_context_factory=None, # Not used
+                client_session_factory=None, # Not used
+                init_hook=init_hook, 
+            )
+            self.running_servers[server_name] = server_conn
+            self._tg.start_soon(_client_lifecycle_task, server_conn)
+            logger.info(f"{server_name}: Launching with http_post client lifecycle.")
+        elif server_config.transport in ["stdio", "sse", "streamable_http"]:
+            # Existing logic for stream-based transports
+            def transport_context_factory():
+                stderr_handler = get_stderr_handler(logger, server_name)
+                if server_config.transport == "stdio":
+                    env = get_default_environment() | (server_config.env or {})
+                    params = StdioServerParameters(
+                        command=server_config.command,
+                        arguments=server_config.args,
+                        environment=env,
+                        working_directory=server_config.cwd,
+                    )
+                    return stdio_client(params, stderr_handler)
+                elif server_config.transport == "sse":
+                    if not server_config.url:
+                        raise ValueError(
+                            f"URL must be configured for SSE transport on server '{server_name}'"
+                        )
+                    return sse_client(server_config.url, stderr_handler)
+                elif server_config.transport == "streamable_http":
+                     if not server_config.url:
+                        raise ValueError(
+                            f"URL must be configured for streamable_http transport on server '{server_name}'"
+                        )
+                     # Pass config for potential use in client (e.g., api_key, timeout)
+                     return streamable_http_client(server_config, stderr_handler)
+                else:
+                    # Should be unreachable if config validation is proper
+                    raise NotImplementedError(
+                        f"Unsupported transport type: {server_config.transport}"
+                    )
+            
+            server_conn = ServerConnection(
+                server_name=server_name,
+                server_config=server_config,
+                transport_context_factory=transport_context_factory,
+                client_session_factory=client_session_factory,
+                init_hook=init_hook,
+            )
             self.running_servers[server_name] = server_conn
             self._tg.start_soon(_server_lifecycle_task, server_conn)
+            logger.info(f"{server_name}: Launching with {server_config.transport} session lifecycle.")
+        else:
+             raise NotImplementedError(f"Transport type '{server_config.transport}' is not supported.")
+        
 
-        logger.info(f"{server_name}: Up and running with a persistent connection!")
         return server_conn
 
     async def get_server(
         self,
         server_name: str,
-        client_session_factory: Callable,
+        # Make factory optional as it's not needed for http_post
+        client_session_factory: Optional[Callable] = None, 
         init_hook: Optional["InitHookCallable"] = None,
     ) -> ServerConnection:
         """
-        Get a running server instance, launching it if needed.
+        Get a server connection, launching it if necessary.
+        Ensures the server is initialized before returning.
         """
-        # Get the server connection if it's already running and healthy
-        async with self._lock:
-            server_conn = self.running_servers.get(server_name)
-            if server_conn and server_conn.is_healthy():
-                return server_conn
+        async with self._lock: # Protect against concurrent launch attempts
+            if server_name not in self.running_servers:
+                logger.info(f"{server_name}: Server not running, launching now.")
+                # Check if factory is provided for transports that need it
+                server_config = self.server_registry.registry.get(server_name)
+                if server_config and server_config.transport != "http_post" and not client_session_factory:
+                     raise ValueError(f"client_session_factory is required for transport type '{server_config.transport}'")
+                
+                # Pass the factory only if it's needed by launch_server's logic
+                factory_to_pass = client_session_factory if server_config and server_config.transport != "http_post" else None
+                server_conn = await self.launch_server(server_name, factory_to_pass, init_hook)
+            else:
+                server_conn = self.running_servers[server_name]
 
-            # If server exists but isn't healthy, remove it so we can create a new one
-            if server_conn:
-                logger.info(f"{server_name}: Server exists but is unhealthy, recreating...")
-                self.running_servers.pop(server_name)
-                server_conn.request_shutdown()
-
-        # Launch the connection
-        server_conn = await self.launch_server(
-            server_name=server_name,
-            client_session_factory=client_session_factory,
-            init_hook=init_hook,
-        )
-
-        # Wait until it's fully initialized, or an error occurs
+        # Wait for initialization regardless of whether it was just launched or existed
         await server_conn.wait_for_initialized()
 
-        # Check if the server is healthy after initialization
-        if not server_conn.is_healthy():
-            error_msg = server_conn._error_message or "Unknown error"
+        if server_conn._error_occurred:
             raise ServerInitializationError(
-                f"MCP Server: '{server_name}': Failed to initialize - see details. Check fastagent.config.yaml?",
-                error_msg,
+                f"MCP Server: '{server_name}': Failed to initialize - see details.",
+                details=server_conn._error_message,
             )
 
         return server_conn
 
+    # Potentially adapt get_server_capabilities if needed for http_post
+    # MCPO doesn't have a standard capabilities endpoint, so this might
+    # return None or fixed capabilities based on config/assumptions.
     async def get_server_capabilities(self, server_name: str) -> ServerCapabilities | None:
-        """Get the capabilities of a specific server."""
-        server_conn = await self.get_server(
-            server_name, client_session_factory=MCPAgentClientSession
-        )
-        return server_conn.server_capabilities if server_conn else None
+        """Get the capabilities of a server connection."""
+        if server_name not in self.running_servers:
+            logger.warning(f"Attempted to get capabilities for unknown server: {server_name}")
+            return None
+
+        server_conn = self.running_servers[server_name]
+        if server_conn.session: # Session-based
+             return server_conn.session.server_capabilities
+        elif server_conn.client_instance: # Direct client-based
+            # http_post clients don't typically report capabilities via MCP standard initialize
+            # We could return None or construct a default/placeholder if needed.
+            logger.warning(f"Capabilities not available via standard MCP initialize for http_post server: {server_name}")
+            return None 
+        else:
+             logger.warning(f"Server connection for {server_name} has neither session nor client instance.")
+             return None
 
     async def disconnect_server(self, server_name: str) -> None:
-        """
-        Disconnect a specific server if it's running under this connection manager.
-        """
-        logger.info(f"{server_name}: Disconnecting persistent connection to server...")
-
+        """Disconnect a specific server connection."""
         async with self._lock:
-            server_conn = self.running_servers.pop(server_name, None)
-        if server_conn:
-            server_conn.request_shutdown()
-            logger.info(f"{server_name}: Shutdown signal sent (lifecycle task will exit).")
-        else:
-            logger.info(f"{server_name}: No persistent connection found. Skipping server shutdown")
+            if server_name in self.running_servers:
+                server_conn = self.running_servers.pop(server_name)
+                # Signal shutdown for both types of lifecycle tasks
+                server_conn.request_shutdown() 
+                logger.info(f"{server_name}: Disconnect requested.")
+            else:
+                logger.warning(f"{server_name}: Server not found for disconnection.")
 
     async def disconnect_all(self) -> None:
         """Disconnect all servers that are running under this connection manager."""

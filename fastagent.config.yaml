@@ -40,12 +40,12 @@ mcp:
     
     # MCPO Time endpoint - provides time tools (get_current_time, convert_time)
     mcpo-time:
-      transport: "streamable_http"
+      transport: "http_post"
       url: "http://localhost:8000/time"
     
     # MCPO Fetch endpoint - HTTP fetching tool
     mcpo-fetch:
-      transport: "streamable_http"
+      transport: "http_post"
       url: "http://localhost:8000/fetch"
     
     # Other available MCPO endpoints
