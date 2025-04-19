@@ -186,6 +186,18 @@ async def mcpo_http_client(
                 await message_queue.put(fake_response)
                 return
             
+            # Handle tools/list and other MCP metadata requests
+            if method == "tools/list":
+                logger.info("MCPO HTTP: Handling tools/list request with empty tool list")
+                # MCPO doesn't have a standard tools/list method, so we return an empty list
+                tools_response = {
+                    "jsonrpc": "2.0",
+                    "id": message_id,
+                    "result": []
+                }
+                await message_queue.put(tools_response)
+                return
+            
             # If this isn't an MCPO-compatible method, return appropriate error
             if not method or method.startswith("sampling/") or method.startswith("resources/") or method.startswith("roots/"):
                 logger.warning(f"MCPO HTTP: Unsupported method '{method}' - MCPO only supports direct tool calls")

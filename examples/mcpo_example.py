@@ -43,6 +43,7 @@ async def main(message: str) -> str:
     try:
         # Call the get_current_time tool from MCPO
         # This gets the current time in a specific timezone
+        print("About to call get_current_time tool...")
         time_result = await fast.context.executor.call_tool(
             "get_current_time", 
             {"timezone": "America/New_York"},  # Optional timezone parameter
@@ -52,6 +53,7 @@ async def main(message: str) -> str:
         
         # Call the convert_time tool from MCPO
         # This converts time between timezones
+        print("About to call convert_time tool...")
         convert_result = await fast.context.executor.call_tool(
             "convert_time", 
             {
@@ -64,6 +66,7 @@ async def main(message: str) -> str:
         print(f"Converted time: {convert_result}")
         
         # Call the fetch tool from MCPO for comparison
+        print("About to call fetch tool...")
         fetch_result = await fast.context.executor.call_tool(
             "fetch", 
             {
@@ -88,7 +91,9 @@ if __name__ == "__main__":
     # Run the agent
     async def run_agent():
         async with fast.run() as agent:
-            result = await agent.mcpo_example.send(msg)
+            # Explicitly call the main function directly with the message
+            print("Directly calling main function...")
+            result = await main(msg)
             print(f"\nResult: {result}")
     
     asyncio.run(run_agent()) 
