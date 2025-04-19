@@ -31,6 +31,7 @@ from mcp_agent.event_progress import ProgressAction
 from mcp_agent.logging.logger import get_logger
 from mcp_agent.mcp.logger_textio import get_stderr_handler
 from mcp_agent.mcp.mcp_agent_client_session import MCPAgentClientSession
+from mcp_agent.mcp.streamable_http import streamable_http_client
 
 if TYPE_CHECKING:
     from mcp_agent.context import Context
@@ -275,6 +276,22 @@ class MCPConnectionManager(ContextDependent):
                     config.url,
                     config.headers,
                     sse_read_timeout=config.read_transport_sse_timeout_seconds,
+                )
+            elif config.transport == "streamable_http":
+                if not config.url:
+                    raise ValueError(f"URL is required for Streamable HTTP transport: {server_name}")
+                # Create reconnection options based on configuration
+                reconnection_options = {
+                    "initial_reconnection_delay": 1000,  # 1 second
+                    "max_reconnection_delay": 30000,     # 30 seconds
+                    "reconnection_delay_grow_factor": 1.5,
+                    "max_retries": 2,
+                }
+                logger.debug(f"{server_name}: Creating Streamable HTTP client")
+                return streamable_http_client(
+                    config.url,
+                    config.headers,
+                    reconnection_options=reconnection_options,
                 )
             else:
                 raise ValueError(f"Unsupported transport: {config.transport}")

@@ -28,6 +28,7 @@ from mcp_agent.config import (
 from mcp_agent.logging.logger import get_logger
 from mcp_agent.mcp.logger_textio import get_stderr_handler
 from mcp_agent.mcp.mcp_connection_manager import MCPConnectionManager
+from mcp_agent.mcp.streamable_http import streamable_http_client
 
 logger = get_logger(__name__)
 
@@ -164,6 +165,36 @@ class ServerRegistry:
                 )
                 async with session:
                     logger.info(f"{server_name}: Connected to server using SSE transport.")
+                    try:
+                        yield session
+                    finally:
+                        logger.debug(f"{server_name}: Closed session to server")
+
+        elif config.transport == "streamable_http":
+            if not config.url:
+                raise ValueError(f"URL is required for Streamable HTTP transport: {server_name}")
+
+            # Create reconnection options based on configuration
+            reconnection_options = {
+                "initial_reconnection_delay": 1000,  # 1 second
+                "max_reconnection_delay": 30000,     # 30 seconds
+                "reconnection_delay_grow_factor": 1.5,
+                "max_retries": 2,
+            }
+
+            # Use streamable_http_client to get the read and write streams
+            async with streamable_http_client(
+                config.url,
+                config.headers,
+                reconnection_options=reconnection_options,
+            ) as (read_stream, write_stream):
+                session = client_session_factory(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds,
+                )
+                async with session:
+                    logger.info(f"{server_name}: Connected to server using Streamable HTTP transport.")
                     try:
                         yield session
                     finally:

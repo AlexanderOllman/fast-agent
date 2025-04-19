@@ -334,7 +334,7 @@ def parse_args():
     parser.add_argument(
         "--transport",
         type=str,
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable_http"],
         default="stdio",
         help="Transport to use (default: stdio)",
     )
@@ -342,7 +342,7 @@ def parse_args():
         "--port",
         type=int,
         default=8000,
-        help="Port to use for SSE transport (default: 8000)",
+        help="Port to use for HTTP-based transport (default: 8000)",
     )
     parser.add_argument(
         "--test", type=str, help="Test a specific prompt without starting the server"
@@ -496,9 +496,12 @@ async def async_main() -> int:
     # Start the server with the specified transport
     if config.transport == "stdio":
         await mcp.run_stdio_async()
-    else:  # sse
+    elif config.transport == "sse":
         # TODO update to 2025-03-26 specification and test config.
         await mcp.run_sse_async()
+    elif config.transport == "streamable_http":
+        # TODO update to 2025-03-26 specification and test config.
+        await mcp.run_sse_async()  # For now, we use the same method as SSE
     return 0
 
 

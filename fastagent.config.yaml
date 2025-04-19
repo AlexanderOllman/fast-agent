@@ -18,3 +18,25 @@ mcp:
     fetch:
       command: "uvx"
       args: ["mcp-server-fetch"]
+    
+    # MCPO endpoint examples using streamable_http transport
+    # Uncomment and modify these examples to use with MCPO
+    
+    # mcpo-fetch:
+    #   transport: "streamable_http"
+    #   url: "http://localhost:8000/fetch"
+    #   headers:
+    #     # Add authentication headers if needed
+    #     # Authorization: "Bearer your-token"
+    #
+    # mcpo-arxiv:
+    #   transport: "streamable_http"
+    #   url: "http://localhost:8000/arxiv-latex"
+    #
+    # mcpo-time:
+    #   transport: "streamable_http"
+    #   url: "http://localhost:8000/time"
+    #
+    # mcpo-serena:
+    #   transport: "streamable_http"
+    #   url: "http://localhost:8000/serena"

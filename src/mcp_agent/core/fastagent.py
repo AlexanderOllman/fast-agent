@@ -114,20 +114,20 @@ class FastAgent:
         )
         parser.add_argument(
             "--transport",
-            choices=["sse", "stdio"],
+            choices=["sse", "stdio", "streamable_http"],
             default="sse",
-            help="Transport protocol to use when running as a server (sse or stdio)",
+            help="Transport protocol to use when running as a server (sse, stdio, or streamable_http)",
         )
         parser.add_argument(
             "--port",
             type=int,
             default=8000,
-            help="Port to use when running as a server with SSE transport",
+            help="Port to use when running as a server with HTTP-based transport",
         )
         parser.add_argument(
             "--host",
             default="0.0.0.0",
-            help="Host address to bind to when running as a server with SSE transport",
+            help="Host address to bind to when running as a server with HTTP-based transport",
         )
 
         if ignore_unknown_args:
@@ -268,7 +268,7 @@ class FastAgent:
                         if not quiet_mode:
                             print(f"Starting FastAgent '{self.name}' in server mode")
                             print(f"Transport: {self.args.transport}")
-                            if self.args.transport == "sse":
+                            if self.args.transport in ["sse", "streamable_http"]:
                                 print(f"Listening on {self.args.host}:{self.args.port}")
                             print("Press Ctrl+C to stop")
 
