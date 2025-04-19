@@ -93,7 +93,8 @@ class MCPServerSettings(BaseModel):
     sampling: MCPSamplingSettings | None = None
     """Sampling settings for this Client/Server pair"""
 
-    working_dir: str = None
+    working_dir: Optional[str] = None
+    """Working directory for the server process."""
 
 
 class MCPSettings(BaseModel):
