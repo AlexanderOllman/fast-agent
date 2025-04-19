@@ -21,7 +21,7 @@ from mcp_agent.core.fastagent import FastAgent
 fast = FastAgent("MCPO-Example")
 
 
-@fast.agent(name="mcpo_example", description="Example agent using MCPO time tools")
+@fast.agent(name="mcpo_example")
 async def main(message: str) -> str:
     """
     Example agent that uses MCPO time tools.
