@@ -164,6 +164,7 @@ async def streamable_http_client(
     headers: Optional[Dict[str, str]] = None,
     reconnection_options: Optional[Dict] = None,
     session_id: Optional[str] = None,
+    skip_initialization: bool = False,  # Set to True for MCPO endpoints
 ) -> AsyncGenerator[Tuple[MemoryObjectReceiveStream, MemoryObjectSendStream], None]:
     """
     Create MCP client connection using Streamable HTTP transport.
@@ -173,6 +174,7 @@ async def streamable_http_client(
         headers: Optional HTTP headers to include in requests
         reconnection_options: Options for handling reconnection (using defaults if not provided)
         session_id: Optional session ID for resuming a previous session
+        skip_initialization: Set to True for MCPO endpoints that don't support MCP initialization
         
     Returns:
         A tuple of (receive_stream, send_stream) for bidirectional communication
@@ -236,77 +238,100 @@ async def streamable_http_client(
                     
         queue_processing_task = asyncio.create_task(process_message_queue())
         
-        # Function to try opening an SSE stream
-        async def open_sse_stream(
-            resumption_token=None, 
-            replay_message_id=None
-        ):
-            nonlocal session_id
-            
-            current_headers = request_headers.copy()
-            if resumption_token:
-                current_headers["Last-Event-ID"] = resumption_token
+        # For MCPO endpoints, we skip the SSE stream initialization
+        # They only need direct POST requests for each tool call
+        sse_task = None
+        if not skip_initialization:
+            # Function to try opening an SSE stream
+            async def open_sse_stream(
+                resumption_token=None, 
+                replay_message_id=None
+            ):
+                nonlocal session_id
                 
-            try:
-                response = await session.get(
-                    url, 
-                    headers=current_headers,
-                    timeout=aiohttp.ClientTimeout(total=None)  # No timeout
-                )
-                
-                # Handle error responses
-                if response.status != 200:
-                    if response.status == 405:
-                        # Server doesn't support GET (expected case)
-                        return None
-                    elif response.status == 401:
-                        # Unauthorized - would need auth handling
-                        raise StreamableHTTPError(
-                            code=response.status, 
-                            message="Authentication required"
-                        )
-                    else:
-                        raise StreamableHTTPError(
-                            code=response.status,
-                            message=f"Failed to open SSE stream: {response.reason}"
-                        )
-                
-                # Check if we got a session ID
-                if "mcp-session-id" in response.headers:
-                    session_id = response.headers.get("mcp-session-id")
-                    # Update request headers with the session ID
-                    request_headers["Mcp-Session-Id"] = session_id
-                
-                # Only process if we got text/event-stream content type
-                content_type = response.headers.get("content-type", "")
-                if "text/event-stream" not in content_type:
-                    raise StreamableHTTPError(
-                        message=f"Expected text/event-stream, got {content_type}"
+                current_headers = request_headers.copy()
+                if resumption_token:
+                    current_headers["Last-Event-ID"] = resumption_token
+                    
+                try:
+                    response = await session.get(
+                        url, 
+                        headers=current_headers,
+                        timeout=aiohttp.ClientTimeout(total=None)  # No timeout
                     )
-                
-                # Process the SSE stream
-                processor = SSEEventProcessor(
-                    response,
-                    message_queue,
-                    on_resumption_token=lambda token: setattr(open_sse_stream, "last_event_id", token),
-                    replay_message_id=replay_message_id
-                )
-                
-                return asyncio.create_task(processor.process())
-            except Exception as e:
-                if not isinstance(e, StreamableHTTPError):
-                    logger.error(f"Error opening SSE stream: {e}")
-                    e = StreamableHTTPError(message=f"Failed to open SSE stream: {e}")
-                await message_queue.put(e)
-                return None
-        
-        # Try to open an initial SSE stream (this is not required by spec)
-        sse_task = await open_sse_stream()
+                    
+                    # Handle error responses
+                    if response.status != 200:
+                        if response.status == 405:
+                            # Server doesn't support GET (expected case)
+                            return None
+                        elif response.status == 401:
+                            # Unauthorized - would need auth handling
+                            raise StreamableHTTPError(
+                                code=response.status, 
+                                message="Authentication required"
+                            )
+                        else:
+                            raise StreamableHTTPError(
+                                code=response.status,
+                                message=f"Failed to open SSE stream: {response.reason}"
+                            )
+                    
+                    # Check if we got a session ID
+                    if "mcp-session-id" in response.headers:
+                        session_id = response.headers.get("mcp-session-id")
+                        # Update request headers with the session ID
+                        request_headers["Mcp-Session-Id"] = session_id
+                    
+                    # Only process if we got text/event-stream content type
+                    content_type = response.headers.get("content-type", "")
+                    if "text/event-stream" not in content_type:
+                        raise StreamableHTTPError(
+                            message=f"Expected text/event-stream, got {content_type}"
+                        )
+                    
+                    # Process the SSE stream
+                    processor = SSEEventProcessor(
+                        response,
+                        message_queue,
+                        on_resumption_token=lambda token: setattr(open_sse_stream, "last_event_id", token),
+                        replay_message_id=replay_message_id
+                    )
+                    
+                    return asyncio.create_task(processor.process())
+                except Exception as e:
+                    if not isinstance(e, StreamableHTTPError):
+                        logger.error(f"Error opening SSE stream: {e}")
+                        e = StreamableHTTPError(message=f"Failed to open SSE stream: {e}")
+                    await message_queue.put(e)
+                    return None
+            
+            # Try to open an initial SSE stream (this is not required by spec)
+            sse_task = await open_sse_stream()
         
         # Sender function - handles sending messages via HTTP POST
         async def sender(message: JSONRPCMessage):
             nonlocal session_id, should_reconnect, reconnect_attempt
             
+            # Special handling for MCPO endpoints
+            if skip_initialization and message.get("method") == "initialize":
+                logger.debug("Skipping initialization message for MCPO endpoint")
+                # For MCPO endpoints, simulate a successful initialization response
+                fake_initialize_response = {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "result": {
+                        "capabilities": {
+                            "tools": {"supported": True},
+                            "prompts": {"supported": False},
+                            "resources": {"supported": False},
+                            "roots": {"supported": False}
+                        }
+                    }
+                }
+                await message_queue.put(fake_initialize_response)
+                return
+                
             current_headers = request_headers.copy()
             if session_id:
                 current_headers["Mcp-Session-Id"] = session_id

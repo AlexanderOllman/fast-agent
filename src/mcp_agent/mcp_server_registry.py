@@ -182,11 +182,19 @@ class ServerRegistry:
                 "max_retries": 2,
             }
 
+            # Detect if this is an MCPO endpoint by URL path patterns
+            is_mcpo_endpoint = False
+            if config.url:
+                url_path = config.url.split("/")[-1] if "/" in config.url else ""
+                mcpo_patterns = ["time", "fetch", "arxiv-latex", "serena"]
+                is_mcpo_endpoint = any(pattern in url_path for pattern in mcpo_patterns)
+
             # Use streamable_http_client to get the read and write streams
             async with streamable_http_client(
                 config.url,
                 config.headers,
                 reconnection_options=reconnection_options,
+                skip_initialization=is_mcpo_endpoint,  # Skip initialization for MCPO endpoints
             ) as (read_stream, write_stream):
                 session = client_session_factory(
                     read_stream,

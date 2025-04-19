@@ -2,7 +2,7 @@
 # Examples in comments below - check/change the paths.
 logger:
   type: file
-  level: error
+  level: debug   # Set to debug for better visibility
   truncate_tools: true
 
 mcp:
@@ -19,24 +19,37 @@ mcp:
       command: "uvx"
       args: ["mcp-server-fetch"]
     
-    # MCPO endpoint examples using streamable_http transport
-    # Uncomment and modify these examples to use with MCPO
-    
-    # mcpo-fetch:
-    #   transport: "streamable_http"
-    #   url: "http://localhost:8000/fetch"
-    #   headers:
-    #     # Add authentication headers if needed
-    #     # Authorization: "Bearer your-token"
+    # ============================================================================
+    # MCPO Endpoint Configuration
+    # ============================================================================
+    # 
+    # MCPO endpoints are RESTful HTTP proxies to individual MCP tools.
+    # To use these with Fast-Agent, uncomment the configurations below
+    # and make sure MCPO is running (e.g., via `npm install -g mcpo && mcpo server`).
     #
+    # To use these tools in your code:
+    #
+    # await context.executor.call_tool(
+    #   "get_current_time",    # The actual tool method name (from MCPO docs)
+    #   {"timezone": "UTC"},   # Parameters for the tool
+    #   server="mcpo-time"     # The server name from this config
+    # )
+    
+    # MCPO Time endpoint - provides time tools (get_current_time, convert_time)
+    mcpo-time:
+      transport: "streamable_http"
+      url: "http://localhost:8000/time"
+    
+    # MCPO Fetch endpoint - HTTP fetching tool
+    mcpo-fetch:
+      transport: "streamable_http"
+      url: "http://localhost:8000/fetch"
+    
+    # Other available MCPO endpoints
     # mcpo-arxiv:
     #   transport: "streamable_http"
     #   url: "http://localhost:8000/arxiv-latex"
     #
-    time:
-      transport: "streamable_http"
-      url: "http://localhost:8000/time"
-    
     # mcpo-serena:
     #   transport: "streamable_http"
     #   url: "http://localhost:8000/serena"

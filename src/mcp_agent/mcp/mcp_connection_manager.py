@@ -280,6 +280,7 @@ class MCPConnectionManager(ContextDependent):
             elif config.transport == "streamable_http":
                 if not config.url:
                     raise ValueError(f"URL is required for Streamable HTTP transport: {server_name}")
+                
                 # Create reconnection options based on configuration
                 reconnection_options = {
                     "initial_reconnection_delay": 1000,  # 1 second
@@ -287,11 +288,20 @@ class MCPConnectionManager(ContextDependent):
                     "reconnection_delay_grow_factor": 1.5,
                     "max_retries": 2,
                 }
-                logger.debug(f"{server_name}: Creating Streamable HTTP client")
+                
+                # Detect if this is an MCPO endpoint by URL path patterns
+                is_mcpo_endpoint = False
+                if config.url:
+                    url_path = config.url.split("/")[-1] if "/" in config.url else ""
+                    mcpo_patterns = ["time", "fetch", "arxiv-latex", "serena"]
+                    is_mcpo_endpoint = any(pattern in url_path for pattern in mcpo_patterns)
+                    
+                logger.debug(f"{server_name}: Creating Streamable HTTP client (MCPO endpoint: {is_mcpo_endpoint})")
                 return streamable_http_client(
                     config.url,
                     config.headers,
                     reconnection_options=reconnection_options,
+                    skip_initialization=is_mcpo_endpoint,  # Skip initialization for MCPO endpoints
                 )
             else:
                 raise ValueError(f"Unsupported transport: {config.transport}")
