@@ -8,10 +8,10 @@ from mcp_agent.mcp.tool_execution_result import ToolExecutionResult
 
 
 class HttpPostClient(BaseMcpClient):
-    \"\"\"
+    """
     MCP Client for servers that expect simple HTTP POST requests with JSON payloads,
     like those exposed by MCPO (https://github.com/open-webui/mcpo).
-    \"\"\"
+    """
 
     def __init__(self, server_name: str, config: McpServerConfig):
         super().__init__(server_name, config)
@@ -36,12 +36,12 @@ class HttpPostClient(BaseMcpClient):
         params: Optional[Dict[str, Any]],
         correlation_id: Optional[str] = None, # Added correlation_id for potential future use
     ) -> ToolExecutionResult:
-        \"\"\"
+        """
         Calls a tool on the remote server via HTTP POST.
 
         Assumes the server expects the parameters directly as the JSON body.
         MCPO servers typically map the tool name implicitly via the URL path.
-        \"\"\"
+        """
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
