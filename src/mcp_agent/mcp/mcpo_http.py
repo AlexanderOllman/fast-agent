@@ -12,6 +12,7 @@ agents and apps expecting OpenAPI servers.
 import asyncio
 import json
 import logging
+import uuid
 from asyncio import Queue
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union, cast
@@ -21,7 +22,9 @@ import aiohttp
 from anyio import create_memory_object_stream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-from mcp.types import JSONRPCMessage
+from mcp import ClientSession
+from mcp.client.session import SyncClientSession
+from mcp.types import JSONRPCMessage, ServerCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,70 @@ async def receive_from_stream_into_queue(stream, queue):
         await queue.put(e)
 
 
+# Custom client session for MCPO endpoints
+class MCPOClientSession(ClientSession):
+    """A custom ClientSession that overrides the initialize method for MCPO endpoints."""
+    
+    async def initialize(self):
+        """
+        Override the initialize method to avoid sending an actual initialize message
+        to the MCPO endpoint, which doesn't support it.
+        
+        Returns:
+            A fake successful initialization response.
+        """
+        logger.info("MCPO HTTP: Using custom initialize method")
+        
+        # Return a fake successful initialization response
+        return ServerCapabilities(
+            tools={"supported": True},
+            prompts={"supported": False},
+            resources={"supported": False},
+            roots={"supported": False}
+        )
+    
+    async def call_tool(self, method: str, params: Dict, **kwargs):
+        """
+        Call a tool on the MCPO endpoint.
+        
+        Args:
+            method: The name of the tool method to call
+            params: The parameters to pass to the tool
+            
+        Returns:
+            The result of the tool call
+        """
+        logger.debug(f"MCPO HTTP: Calling tool {method} with params {params}")
+        
+        # Generate a unique ID for this request
+        request_id = str(uuid.uuid4())
+        
+        # Format as JSON-RPC request
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params
+        }
+        
+        # Send the request through the normal write stream
+        await self._write_stream.send(request)
+        
+        # Wait for the response with matching ID
+        while True:
+            message = await self._read_stream.receive()
+            
+            if isinstance(message, Exception):
+                raise message
+                
+            if message.get("id") == request_id:
+                if "error" in message:
+                    error = message["error"]
+                    raise Exception(f"MCPO tool error: {error.get('message', 'Unknown error')}")
+                
+                return message.get("result")
+
+
 class MCPOHTTPError(Exception):
     """Error during MCPO HTTP connection."""
 
@@ -58,11 +125,6 @@ DEFAULT_MCPO_HTTP_RECONNECTION_OPTIONS = {
     "reconnection_delay_grow_factor": 1.5,
     "max_retries": 2,
 }
-
-
-# Initialize event to signify that first initialization response was sent
-# This is crucial to prevent double initialization response issues
-INIT_RESPONSE_SENT = False
 
 
 @asynccontextmanager
@@ -88,10 +150,6 @@ async def mcpo_http_client(
     Returns:
         A tuple of (receive_stream, send_stream) for bidirectional communication
     """
-    # Reset initialization flag at the start of a new client
-    global INIT_RESPONSE_SENT
-    INIT_RESPONSE_SENT = False
-    
     # Initialize reconnection options with defaults
     recon_options = DEFAULT_MCPO_HTTP_RECONNECTION_OPTIONS.copy()
     if reconnection_options:
@@ -146,8 +204,6 @@ async def mcpo_http_client(
         
         # Sender function - handles sending messages via HTTP POST to MCPO
         async def sender(message: JSONRPCMessage):
-            global INIT_RESPONSE_SENT
-            
             # Get key values from the message
             method = message.get("method")
             params = message.get("params", {})
@@ -156,27 +212,9 @@ async def mcpo_http_client(
             # Log the message we're sending
             logger.debug(f"MCPO HTTP: Sending message method={method}, id={message_id}")
             
-            # Handle initialization specially - MCPO doesn't need MCP initialization
-            if method == "initialize" and not INIT_RESPONSE_SENT:
-                logger.info("MCPO HTTP: Handling initialization for MCPO endpoint")
-                INIT_RESPONSE_SENT = True
-                
-                # For MCPO endpoints, simulate a successful initialization response
-                fake_initialize_response = {
-                    "jsonrpc": "2.0",
-                    "id": message_id,
-                    "result": {
-                        "capabilities": {
-                            "tools": {"supported": True},
-                            "prompts": {"supported": False},
-                            "resources": {"supported": False},
-                            "roots": {"supported": False}
-                        }
-                    }
-                }
-                
-                logger.debug(f"MCPO HTTP: Sending fake initialization response: {fake_initialize_response}")
-                await message_queue.put(fake_initialize_response)
+            # Skip initialize method - it's handled by our custom session class
+            if method == "initialize":
+                logger.info("MCPO HTTP: Ignoring initialize request - handled by custom session")
                 return
             
             # If this isn't an MCPO-compatible method, return appropriate error
@@ -253,7 +291,7 @@ async def mcpo_http_client(
         send_task = asyncio.create_task(process_send_stream())
         
         try:
-            # Pre-send a capabilities message before yielding to avoid init message validation issues
+            # Log ready status
             logger.info("MCPO HTTP: Client ready for communication")
             
             # Yield streams for the client to use

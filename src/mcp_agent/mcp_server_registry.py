@@ -173,9 +173,10 @@ class ServerRegistry:
         elif config.transport == "mcpo_http":
             if not config.url:
                 raise ValueError(f"URL is required for MCPO HTTP transport: {server_name}")
-
-            from mcp_agent.mcp.mcpo_http import mcpo_http_client
-
+            
+            # Import dynamically to avoid circular imports
+            from mcp_agent.mcp.mcpo_http import mcpo_http_client, MCPOClientSession
+            
             # Create reconnection options based on configuration
             reconnection_options = {
                 "initial_reconnection_delay": 1000,  # 1 second
@@ -183,14 +184,18 @@ class ServerRegistry:
                 "reconnection_delay_grow_factor": 1.5,
                 "max_retries": 2,
             }
-
-            # Use mcpo_http_client to get the read and write streams
-            async with mcpo_http_client(
+            
+            logger.debug(f"{server_name}: Creating MCPO HTTP client for endpoint: {config.url}")
+            transport_context = mcpo_http_client(
                 config.url,
                 config.headers,
                 reconnection_options=reconnection_options,
-            ) as (read_stream, write_stream):
-                session = client_session_factory(
+            )
+            
+            # Use the custom session for MCPO HTTP transport
+            async with transport_context as (read_stream, write_stream):
+                # Override the client_session_factory to use our custom MCPO session
+                session = MCPOClientSession(
                     read_stream,
                     write_stream,
                     read_timeout_seconds,
@@ -201,6 +206,7 @@ class ServerRegistry:
                         yield session
                     finally:
                         logger.debug(f"{server_name}: Closed session to server")
+            return  # Return early since we've handled the context directly
 
         elif config.transport == "streamable_http":
             if not config.url:
