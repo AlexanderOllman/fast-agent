@@ -96,5 +96,3 @@ class HttpPostClient(BaseMcpClient):
     # specific to streaming/process transports if they exist in BaseMcpClient
     # and are not applicable here.
 
-
-</rewritten_file> 
