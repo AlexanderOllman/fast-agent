@@ -47,25 +47,47 @@ async def receive_from_stream_into_queue(stream, queue):
 
 # Custom client session for MCPO endpoints
 class MCPOClientSession(ClientSession):
-    """A custom ClientSession that overrides the initialize method for MCPO endpoints."""
+    """A custom ClientSession that completely overrides initialization for MCPO endpoints."""
     
-    async def initialize(self):
-        """
-        Override the initialize method to avoid sending an actual initialize message
-        to the MCPO endpoint, which doesn't support it.
-        
-        Returns:
-            A fake successful initialization response.
-        """
-        logger.info("MCPO HTTP: Using custom initialize method")
-        
-        # Return a fake successful initialization response
-        return ServerCapabilities(
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Flag to track if we're initialized
+        self._is_initialized = False
+        self._capabilities = ServerCapabilities(
             tools={"supported": True},
             prompts={"supported": False},
             resources={"supported": False},
             roots={"supported": False}
         )
+    
+    async def __aenter__(self):
+        """
+        Override the enter method to avoid sending an actual initialize message
+        to the MCPO endpoint, which doesn't support it.
+        """
+        logger.info("MCPO HTTP: Custom session __aenter__ called")
+        
+        # We need to enter the task group still
+        await self._task_group.__aenter__()
+        
+        # But we don't want to send the initialize message that would normally happen here
+        # So we'll mark ourselves as initialized without sending any message
+        self._is_initialized = True
+        
+        return self
+    
+    async def initialize(self):
+        """
+        Override the initialize method to return pre-defined capabilities
+        without sending any message to the server.
+        
+        Returns:
+            ServerCapabilities object with pre-defined values
+        """
+        logger.info("MCPO HTTP: Using custom initialize method")
+        
+        # Return pre-defined capabilities
+        return self._capabilities
     
     async def call_tool(self, method: str, params: Dict, **kwargs):
         """
@@ -163,10 +185,16 @@ async def mcpo_http_client(
         request_headers.update(headers)
     
     # Create memory streams for sending/receiving JSON-RPC messages
-    receive_stream_send, receive_stream_recv = create_memory_object_stream[Union[JSONRPCMessage, Exception]](
+    # We'll wrap these with our filtering streams
+    raw_receive_stream_send, raw_receive_stream_recv = create_memory_object_stream[Union[JSONRPCMessage, Exception]](
         max_buffer_size=32
     )
-    send_stream_send, send_stream_recv = create_memory_object_stream[JSONRPCMessage](
+    raw_send_stream_send, raw_send_stream_recv = create_memory_object_stream[JSONRPCMessage](
+        max_buffer_size=32
+    )
+    
+    # Create filtered streams that intercept initialize messages
+    filtered_send_stream_send, filtered_send_stream_recv = create_memory_object_stream[JSONRPCMessage](
         max_buffer_size=32
     )
     
@@ -177,12 +205,26 @@ async def mcpo_http_client(
     session = aiohttp.ClientSession()
     
     try:
-        # Start message forwarding task
+        # Start task to filter outgoing messages
+        async def filter_outgoing_messages():
+            async for message in filtered_send_stream_recv:
+                # Completely block all initialize messages
+                if message.get("method") == "initialize":
+                    logger.info("MCPO HTTP: Blocking initialize message at transport level")
+                    # Just drop the message - don't forward it
+                    continue
+                    
+                # Forward all other messages
+                await raw_send_stream_send.send(message)
+        
+        filter_task = asyncio.create_task(filter_outgoing_messages())
+        
+        # Start message forwarding task from raw transport to queue
         forwarding_task = asyncio.create_task(
-            receive_from_stream_into_queue(send_stream_recv, message_queue)
+            receive_from_stream_into_queue(raw_send_stream_recv, message_queue)
         )
         
-        # Start a task to process the message queue
+        # Start a task to process the message queue to the receive stream
         async def process_message_queue():
             while True:
                 try:
@@ -190,14 +232,14 @@ async def mcpo_http_client(
                     
                     if isinstance(message, Exception):
                         logger.error(f"Processing error message: {message}")
-                        await receive_stream_send.send(message)
+                        await raw_receive_stream_send.send(message)
                     else:
                         # It's a JSON-RPC message
                         logger.debug(f"Processing message: {message}")
-                        await receive_stream_send.send(cast(JSONRPCMessage, message))
+                        await raw_receive_stream_send.send(cast(JSONRPCMessage, message))
                 except Exception as e:
                     logger.error(f"Error forwarding message: {e}")
-                    await receive_stream_send.send(e)
+                    await raw_receive_stream_send.send(e)
                     
         queue_processing_task = asyncio.create_task(process_message_queue())
         
@@ -211,9 +253,23 @@ async def mcpo_http_client(
             # Log the message we're sending
             logger.debug(f"MCPO HTTP: Sending message method={method}, id={message_id}")
             
-            # Skip initialize method - it's handled by our custom session class
+            # Skip initialize method - completely ignore it at this level
             if method == "initialize":
-                logger.info("MCPO HTTP: Ignoring initialize request - handled by custom session")
+                logger.info("MCPO HTTP: Ignoring initialize request at sender level")
+                # Manually send a successful response to the initialize request
+                fake_response = {
+                    "jsonrpc": "2.0",
+                    "id": message_id,
+                    "result": {
+                        "capabilities": {
+                            "tools": {"supported": True},
+                            "prompts": {"supported": False},
+                            "resources": {"supported": False},
+                            "roots": {"supported": False}
+                        }
+                    }
+                }
+                await message_queue.put(fake_response)
                 return
             
             # If this isn't an MCPO-compatible method, return appropriate error
@@ -284,7 +340,7 @@ async def mcpo_http_client(
         
         # Start a task to process outgoing messages
         async def process_send_stream():
-            async for message in send_stream_recv:
+            async for message in raw_send_stream_recv:
                 await sender(message)
                 
         send_task = asyncio.create_task(process_send_stream())
@@ -293,19 +349,21 @@ async def mcpo_http_client(
             # Log ready status
             logger.info("MCPO HTTP: Client ready for communication")
             
-            # Yield streams for the client to use
-            yield receive_stream_recv, send_stream_send
+            # Yield filtered streams for the client to use
+            yield raw_receive_stream_recv, filtered_send_stream_send
         finally:
             # Clean up when the client is done
             # Cancel all tasks
             logger.debug("MCPO HTTP: Cleaning up client connection")
+            filter_task.cancel()
             forwarding_task.cancel()
             queue_processing_task.cancel()
             send_task.cancel()
             
             # Close the memory streams
-            await receive_stream_send.aclose()
-            await send_stream_send.aclose()
+            await raw_receive_stream_send.aclose()
+            await raw_send_stream_send.aclose()
+            await filtered_send_stream_send.aclose()
     finally:
         # Ensure we close the aiohttp session
         logger.debug("MCPO HTTP: Closing HTTP session")
