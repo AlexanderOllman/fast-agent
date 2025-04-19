@@ -33,10 +33,10 @@ mcp:
     #   transport: "streamable_http"
     #   url: "http://localhost:8000/arxiv-latex"
     #
-    # mcpo-time:
-    #   transport: "streamable_http"
-    #   url: "http://localhost:8000/time"
-    #
+    time:
+      transport: "streamable_http"
+      url: "http://localhost:8000/time"
+    
     # mcpo-serena:
     #   transport: "streamable_http"
     #   url: "http://localhost:8000/serena"
