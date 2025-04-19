@@ -17,10 +17,26 @@ import aiohttp
 from anyio import create_memory_object_stream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-from mcp.client.session import receive_from_stream_into_queue
 from mcp.types import JSONRPCMessage
 
 logger = logging.getLogger(__name__)
+
+
+# Implementation of the missing function from mcp.client.session
+async def receive_from_stream_into_queue(stream, queue):
+    """
+    Receives messages from a stream and puts them into a queue.
+    
+    Args:
+        stream: The stream to receive messages from
+        queue: The queue to put messages into
+    """
+    try:
+        async for message in stream:
+            await queue.put(message)
+    except Exception as e:
+        logger.error(f"Error receiving from stream: {e}")
+        await queue.put(e)
 
 
 class StreamableHTTPError(Exception):
