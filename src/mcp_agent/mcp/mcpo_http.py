@@ -23,7 +23,6 @@ from anyio import create_memory_object_stream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from mcp import ClientSession
-from mcp.client.session import SyncClientSession
 from mcp.types import JSONRPCMessage, ServerCapabilities
 
 logger = logging.getLogger(__name__)
