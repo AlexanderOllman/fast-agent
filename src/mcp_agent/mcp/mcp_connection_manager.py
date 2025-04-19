@@ -82,6 +82,9 @@ class ServerConnection:
         # Track error state
         self._error_occurred = False
         self._error_message = None
+        
+        # For mcpo_http servers, mark as already running since they're external HTTP endpoints
+        self._is_external_server = server_config.transport == "mcpo_http"
 
     def is_healthy(self) -> bool:
         """Check if the server connection is healthy and ready to use."""
@@ -109,6 +112,24 @@ class ServerConnection:
         Initializes the server connection and session.
         Must be called within an async context.
         """
+        # For mcpo_http servers, we don't need to run initialization since they're external
+        if hasattr(self, '_is_external_server') and self._is_external_server:
+            logger.info(f"{self.server_name}: External MCPO HTTP server, skipping standard initialization")
+            # Pre-set capabilities for MCPO servers
+            self.server_capabilities = ServerCapabilities(
+                tools={"supported": True},
+                prompts={"supported": False},
+                resources={"supported": False},
+                roots={"supported": False}
+            )
+            # If there's an init hook, run it
+            if self._init_hook:
+                logger.info(f"{self.server_name}: Executing init hook.")
+                self._init_hook(self.session, self.server_config.auth)
+            
+            # Now the session is ready for use
+            self._initialized_event.set()
+            return
 
         result = await self.session.initialize()
 
