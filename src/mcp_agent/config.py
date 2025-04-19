@@ -6,7 +6,7 @@ for the application configuration.
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,20 +53,20 @@ class MCPServerSettings(BaseModel):
     """
 
     # TODO: saqadri - server name should be something a server can provide itself during initialization
-    name: str | None = None
+    name: Optional[str] = None
     """The name of the server."""
 
     # TODO: saqadri - server description should be something a server can provide itself during initialization
     description: str | None = None
     """The description of the server."""
 
-    transport: Literal["stdio", "sse", "streamable_http"] = "stdio"
+    transport: Literal["stdio", "sse", "streamable_http", "mcpo_http"] = "stdio"
     """The transport mechanism."""
 
-    command: str | None = None
+    command: Optional[str] = None
     """The command to execute the server (e.g. npx)."""
 
-    args: List[str] | None = None
+    args: List[str] = Field(default_factory=list)
     """The arguments for the server command."""
 
     read_timeout_seconds: int | None = None
@@ -75,23 +75,25 @@ class MCPServerSettings(BaseModel):
     read_transport_sse_timeout_seconds: int = 300
     """The timeout in seconds for the server connection."""
 
-    url: str | None = None
+    url: Optional[str] = None
     """The URL for the server (e.g. for SSE transport)."""
 
-    headers: Dict[str, str] | None = None
+    headers: Dict[str, str] = Field(default_factory=dict)
     """Headers dictionary for SSE connections"""
 
-    auth: MCPServerAuthSettings | None = None
+    auth: Optional[Dict[str, str]] = None
     """The authentication configuration for the server."""
 
     roots: Optional[List[MCPRootSettings]] = None
     """Root directories this server has access to."""
 
-    env: Dict[str, str] | None = None
+    env: Dict[str, str] = Field(default_factory=dict)
     """Environment variables to pass to the server process."""
 
     sampling: MCPSamplingSettings | None = None
     """Sampling settings for this Client/Server pair"""
+
+    working_dir: str = None
 
 
 class MCPSettings(BaseModel):

@@ -8,7 +8,8 @@ how to configure and use MCPO endpoints with Fast-Agent.
 
 To run this example, you need:
 1. MCPO running (e.g., via `npm install -g mcpo && mcpo server`)
-2. Configure the servers in fastagent.config.yaml (see comments in that file)
+2. Configure the servers in fastagent.config.yaml with mcpo_http transport
+   (see the configuration in that file)
 """
 
 import asyncio
@@ -37,7 +38,7 @@ async def main(message: str) -> str:
         The result of the tool calls
     """
     # This is just a demonstration - normally you'd use a proper conversation flow
-    print("Using MCPO endpoints with Fast-Agent")
+    print("Using MCPO endpoints with Fast-Agent (mcpo_http transport)")
     
     try:
         # Call the get_current_time tool from MCPO

@@ -40,19 +40,19 @@ mcp:
     
     # MCPO Time endpoint - provides time tools (get_current_time, convert_time)
     mcpo-time:
-      transport: "http_post"
+      transport: "mcpo_http"  # Use mcpo_http transport for MCPO endpoints
       url: "http://localhost:8000/time"
     
     # MCPO Fetch endpoint - HTTP fetching tool
     mcpo-fetch:
-      transport: "http_post"
+      transport: "mcpo_http"  # Use mcpo_http transport for MCPO endpoints
       url: "http://localhost:8000/fetch"
     
     # Other available MCPO endpoints
     # mcpo-arxiv:
-    #   transport: "streamable_http"
+    #   transport: "mcpo_http"
     #   url: "http://localhost:8000/arxiv-latex"
     #
     # mcpo-serena:
-    #   transport: "streamable_http"
+    #   transport: "mcpo_http"
     #   url: "http://localhost:8000/serena"

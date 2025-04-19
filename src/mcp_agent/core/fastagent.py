@@ -112,11 +112,13 @@ class FastAgent:
             action="store_true",
             help="Run as an MCP server",
         )
-        parser.add_argument(
+        server_parser = parser.add_argument_group("MCP Server Mode")
+        server_parser.add_argument(
             "--transport",
-            choices=["sse", "stdio", "streamable_http"],
-            default="sse",
-            help="Transport protocol to use when running as a server (sse, stdio, or streamable_http)",
+            type=str,
+            choices=["sse", "stdio", "streamable_http", "mcpo_http"],
+            default="stdio",
+            help="Transport protocol to use when running as a server (sse, stdio, streamable_http, or mcpo_http)",
         )
         parser.add_argument(
             "--port",
