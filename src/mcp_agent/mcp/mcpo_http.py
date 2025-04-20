@@ -13,12 +13,13 @@ import asyncio
 import json
 import logging
 import uuid
+import re
+import aiohttp
 from asyncio import Queue
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import urljoin, urlparse
 
-import aiohttp
 from anyio import create_memory_object_stream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
@@ -60,6 +61,120 @@ DEFAULT_MCPO_HTTP_RECONNECTION_OPTIONS = {
     "reconnection_delay_grow_factor": 1.5,
     "max_retries": 2,
 }
+
+
+# Function to extract tools from MCPO OpenAPI spec
+async def fetch_mcpo_tools(base_url: str, session: aiohttp.ClientSession) -> Dict:
+    """
+    Fetches tool information from the MCPO OpenAPI spec.
+    
+    Args:
+        base_url: The base URL of the MCPO server
+        session: The aiohttp client session
+        
+    Returns:
+        A dictionary containing the tool definitions in MCP format
+    """
+    try:
+        # First try the specific endpoint's OpenAPI spec
+        endpoint_url = f"{base_url}/openapi.json"
+        response = await session.get(endpoint_url)
+        
+        if response.status != 200:
+            # If that fails, try the main MCPO OpenAPI spec
+            root_url = "/".join(base_url.split("/")[:-1])
+            if not root_url:
+                root_url = base_url
+            
+            main_spec_url = f"{root_url}/openapi.json"
+            response = await session.get(main_spec_url)
+            
+            if response.status != 200:
+                logger.error(f"Failed to fetch OpenAPI spec from {endpoint_url} or {main_spec_url}")
+                return {"tools": []}
+        
+        data = await response.json()
+        
+        # Parse the endpoint path to get the tool name
+        endpoint_path = urlparse(base_url).path
+        tool_name = endpoint_path.split("/")[-1] if endpoint_path else "default"
+        
+        # Find operations in the spec
+        paths = data.get("paths", {})
+        operations = []
+        
+        if len(paths) > 0:
+            # Extract operations from the first path
+            for path, methods in paths.items():
+                for method, operation in methods.items():
+                    if method.lower() == "post":
+                        # Extract operation name from the path
+                        operation_name = path.split("/")[-1]
+                        if operation_name == tool_name:
+                            # If the path matches the tool name, use the tool name directly
+                            operations.append({
+                                "name": tool_name,
+                                "description": operation.get("description", f"MCPO {tool_name} tool"),
+                                "parameters": operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {}).get("properties", {})
+                            })
+                        else:
+                            # Otherwise use the operation name from the path
+                            operations.append({
+                                "name": operation_name,
+                                "description": operation.get("description", f"MCPO {operation_name} operation"),
+                                "parameters": operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {}).get("properties", {})
+                            })
+        
+        # If no operations found and there's a description, try to extract tool info from it
+        if not operations and "description" in data.get("info", {}):
+            description = data["info"]["description"]
+            # Try to find links to tools in the description using a regex
+            tool_pattern = re.compile(r"- \[(.*?)\]\((.*?)\)")
+            tool_matches = tool_pattern.findall(description)
+            
+            if tool_matches:
+                logger.info(f"Found {len(tool_matches)} tools in the OpenAPI description")
+                operations.append({
+                    "name": tool_name,
+                    "description": f"MCPO {tool_name} tool",
+                    "parameters": {}
+                })
+        
+        # If still no operations, add a default one based on the endpoint
+        if not operations:
+            operations.append({
+                "name": tool_name,
+                "description": f"MCPO {tool_name} tool",
+                "parameters": {}
+            })
+        
+        # Convert to MCP format
+        mcp_tools = []
+        for op in operations:
+            param_schema = {}
+            for param_name, param_details in op.get("parameters", {}).items():
+                param_schema[param_name] = {
+                    "type": param_details.get("type", "string"),
+                    "description": param_details.get("description", f"{param_name} parameter"),
+                    "required": param_details.get("required", False)
+                }
+            
+            mcp_tools.append({
+                "name": op["name"],
+                "description": op["description"],
+                "parameters": {
+                    "type": "object",
+                    "properties": param_schema,
+                    "required": [name for name, details in param_schema.items() if details.get("required", False)]
+                }
+            })
+        
+        logger.info(f"Converted {len(mcp_tools)} MCPO tools to MCP format for {base_url}")
+        return {"tools": mcp_tools}
+    
+    except Exception as e:
+        logger.error(f"Error fetching MCPO tools: {e}")
+        return {"tools": []}
 
 
 @asynccontextmanager
@@ -119,6 +234,9 @@ async def mcpo_http_client(
     session = aiohttp.ClientSession()
     
     try:
+        # Cache for tools list to avoid repeated fetching
+        tools_cache = None
+        
         # Start task to filter outgoing messages
         async def filter_outgoing_messages():
             async for message in filtered_send_stream_recv:
@@ -159,6 +277,8 @@ async def mcpo_http_client(
         
         # Sender function - handles sending messages via HTTP POST to MCPO
         async def sender(message: JSONRPCMessage):
+            nonlocal tools_cache
+            
             # Get key values from the message
             method = message.get("method")
             params = message.get("params", {})
@@ -186,8 +306,27 @@ async def mcpo_http_client(
                 await message_queue.put(fake_response)
                 return
             
+            # Handle tools/list method by fetching the OpenAPI spec
+            if method == "tools/list":
+                logger.info("MCPO HTTP: Handling tools/list request by fetching OpenAPI spec")
+                
+                # Use cached tools if available
+                if tools_cache is None:
+                    tools_cache = await fetch_mcpo_tools(url, session)
+                
+                # Send tools list response
+                tools_response = {
+                    "jsonrpc": "2.0",
+                    "id": message_id,
+                    "result": tools_cache
+                }
+                
+                logger.debug(f"MCPO HTTP: Returning tools list: {tools_response}")
+                await message_queue.put(tools_response)
+                return
+            
             # If this isn't an MCPO-compatible method, return appropriate error
-            if not method or method.startswith("sampling/") or method.startswith("resources/") or method.startswith("roots/"):
+            if method and (method.startswith("sampling/") or method.startswith("resources/") or method.startswith("roots/")):
                 logger.warning(f"MCPO HTTP: Unsupported method '{method}' - MCPO only supports direct tool calls")
                 # These are MCP methods not supported by MCPO - return appropriate error
                 error_response = {
@@ -202,10 +341,25 @@ async def mcpo_http_client(
                 return
             
             try:
+                # For tool calls, the method is the tool name
+                # Strip the tools/ prefix if present
+                tool_name = method
+                if tool_name.startswith("tools/"):
+                    tool_name = tool_name[6:]  # Remove 'tools/' prefix
+                
                 # Make the actual HTTP POST request to the MCPO endpoint
                 logger.debug(f"MCPO HTTP: Making POST request to {url} with params: {params}")
+                
+                # The actual endpoint might be the base URL or have an additional path component
+                # Prefer the full endpoint with tool name if we have a direct tool call
+                endpoint_url = url
+                if "/" in url and not url.endswith(tool_name):
+                    # If the URL doesn't end with the tool name, append it
+                    endpoint_url = f"{url}/{tool_name}"
+                
+                logger.debug(f"MCPO HTTP: Final endpoint URL: {endpoint_url}")
                 response = await session.post(
-                    url,
+                    endpoint_url,
                     headers=request_headers,
                     json=params,  # MCPO expects just the params, not the full JSON-RPC message
                 )
