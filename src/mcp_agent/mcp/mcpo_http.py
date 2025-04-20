@@ -212,6 +212,132 @@ async def mcpo_http_client(
                     logger.info("MCPO HTTP: Blocking initialize message at transport level")
                     # Just drop the message - don't forward it
                     continue
+                
+                # Handle tools/list method directly at the filter level
+                if message.get("method") == "tools/list":
+                    logger.info("MCPO HTTP: Intercepting tools/list message at transport level")
+                    
+                    message_id = message.get("id")
+                    
+                    try:
+                        # Extract the endpoint type from the URL
+                        url_path = url.rstrip('/').split('/')[-1]
+                        
+                        tools = []
+                        
+                        # Handle different MCPO endpoints based on URL path
+                        if url_path == "time":
+                            tools = [
+                                {
+                                    "name": "get_current_time",
+                                    "description": "Get current time in a specific timezone",
+                                    "parameters": [
+                                        {
+                                            "name": "timezone",
+                                            "type": "string",
+                                            "description": "Timezone to get the current time for (e.g., 'America/New_York', 'UTC')",
+                                            "required": True
+                                        }
+                                    ]
+                                },
+                                {
+                                    "name": "convert_time",
+                                    "description": "Convert time between timezones",
+                                    "parameters": [
+                                        {
+                                            "name": "source_timezone",
+                                            "type": "string",
+                                            "description": "Source timezone",
+                                            "required": True
+                                        },
+                                        {
+                                            "name": "time",
+                                            "type": "string",
+                                            "description": "Time to convert (format: YYYY-MM-DD HH:MM:SS)",
+                                            "required": True
+                                        },
+                                        {
+                                            "name": "target_timezone",
+                                            "type": "string",
+                                            "description": "Target timezone",
+                                            "required": True
+                                        }
+                                    ]
+                                }
+                            ]
+                        elif url_path == "fetch":
+                            tools = [
+                                {
+                                    "name": "fetch",
+                                    "description": "Fetches a URL from the internet and optionally extracts its contents as markdown",
+                                    "parameters": [
+                                        {
+                                            "name": "url",
+                                            "type": "string",
+                                            "description": "URL to fetch",
+                                            "required": True
+                                        },
+                                        {
+                                            "name": "max_length",
+                                            "type": "integer",
+                                            "description": "Maximum length to return",
+                                            "required": False
+                                        },
+                                        {
+                                            "name": "raw",
+                                            "type": "boolean",
+                                            "description": "Whether to return raw content",
+                                            "required": False
+                                        }
+                                    ]
+                                }
+                            ]
+                        elif url_path == "arxiv-latex":
+                            tools = [
+                                {
+                                    "name": "get_paper_prompt",
+                                    "description": "Get a flattened LaTeX code of a paper from arXiv ID",
+                                    "parameters": [
+                                        {
+                                            "name": "arxiv_id",
+                                            "type": "string",
+                                            "description": "The arXiv ID of the paper (e.g., '2403.12345')",
+                                            "required": True
+                                        }
+                                    ]
+                                }
+                            ]
+                        else:
+                            # For unknown endpoints, return an empty list
+                            logger.warning(f"MCPO HTTP: Unknown endpoint path: {url_path}, returning empty tools list")
+                        
+                        # Create a proper MCP response for tools/list
+                        tools_response = {
+                            "jsonrpc": "2.0",
+                            "id": message_id,
+                            "result": {
+                                "items": tools,
+                                "isIncomplete": False
+                            }
+                        }
+                        
+                        logger.debug(f"MCPO HTTP: Sending tools response with {len(tools)} tools at filter level")
+                        await message_queue.put(tools_response)
+                        
+                    except Exception as e:
+                        logger.error(f"Error handling tools/list at filter level: {e}")
+                        error_response = {
+                            "jsonrpc": "2.0",
+                            "id": message_id,
+                            "error": {
+                                "code": -32000,
+                                "message": f"Error handling tools/list: {str(e)}"
+                            }
+                        }
+                        await message_queue.put(error_response)
+                    
+                    # Don't forward this message to the sender
+                    continue
                     
                 # Forward all other messages
                 await raw_send_stream_send.send(message)
